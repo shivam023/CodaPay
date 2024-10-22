@@ -1,10 +1,8 @@
 package com.example.roundrobin.service;
 
 import com.example.roundrobin.service.interfaces.IRoundRobinService;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
@@ -22,27 +20,25 @@ public class RoundRobinService implements IRoundRobinService {
     private static final Logger logger = LoggerFactory.getLogger(RoundRobinService.class);
 
     private final RestTemplate restTemplate;
-
-    @Value("${application.instances}")
-    String instanceUrls;
-
-    private List<String> instances;
+    private volatile List<String> instances;  // Mark the instance list as volatile for thread safety
     private final AtomicInteger counter = new AtomicInteger(0);
-    private int maxAttempts;
+    private final AtomicInteger maxAttempts = new AtomicInteger(0);
     final ConcurrentHashMap<String, Instant> circuitBreaker = new ConcurrentHashMap<>();
 
     public RoundRobinService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 
-    @PostConstruct
-    void init() {
-        if (instanceUrls == null || instanceUrls.isEmpty()) {
-            logger.error("No instances provided in configuration. Please check your configuration.");
-            throw new IllegalArgumentException("Instance URLs cannot be null or empty");
-        }
-        this.instances = List.of(instanceUrls.split(","));
-        this.maxAttempts = instances.size();
+    @Override
+    public void updateInstances(List<String> newInstances) {
+        this.instances = newInstances;
+        maxAttempts.set(instances.size());
+        logger.info("Updated instance list: {}", newInstances);
+    }
+
+    @Override
+    public List<String> getInstances() {
+        return instances;
     }
 
     @Override
@@ -50,11 +46,12 @@ public class RoundRobinService implements IRoundRobinService {
         int attempts = 0;
         String targetInstance;
 
-        while (attempts < maxAttempts) {
-            targetInstance = getNextInstance();
+        int maxAttemptsValue = maxAttempts.get();
+
+        while (attempts < maxAttemptsValue) {
+            targetInstance = getNextInstance(maxAttemptsValue);
             logger.info("Attempting to forward request to instance: {}", targetInstance);
             try {
-                // can use facade design pattern for different rest client calls
                 return restTemplate.postForEntity(Objects.requireNonNull(targetInstance), requestBody, Map.class);
             } catch (RestClientException e) {
                 attempts++;
@@ -63,9 +60,9 @@ public class RoundRobinService implements IRoundRobinService {
                 // Add the instance to the circuit breaker on failure
                 circuitBreaker.put(Objects.requireNonNull(targetInstance), Instant.now());
 
-                if (attempts >= maxAttempts) {
+                if (attempts >= maxAttemptsValue) {
                     logger.error("All instances failed after {} attempts.", attempts);
-                    throw e;
+                    return ResponseEntity.status(503).body(Map.of("error", "All instances are unavailable after " + attempts + " attempts."));
                 }
 
                 logger.info("Retrying with the next instance. Attempt: {}", attempts);
@@ -77,10 +74,10 @@ public class RoundRobinService implements IRoundRobinService {
     }
 
     // Get the next instance in round-robin fashion, skipping instances with open circuits
-    private String getNextInstance() {
+    private String getNextInstance(int maxAttemptsValue) {
         int attempts = 0;
         String instance;
-        while (attempts < maxAttempts) {
+        while (attempts < maxAttemptsValue) {
             instance = instances.get(counter.getAndUpdate(i -> (i + 1) % instances.size()));
 
             if (isCircuitOpen(instance)) {
@@ -93,7 +90,7 @@ public class RoundRobinService implements IRoundRobinService {
         return null;
     }
 
-    private boolean isCircuitOpen(String instance) {
+    boolean isCircuitOpen(String instance) {
         if (circuitBreaker.containsKey(instance)) {
             Instant failedTime = circuitBreaker.get(instance);
             Instant now = Instant.now();
