@@ -2,7 +2,6 @@ package com.example.roundrobin.service;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
@@ -11,139 +10,111 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class RoundRobinServiceTest {
 
-    @InjectMocks
-    private RoundRobinService roundRobinService;
-
     @Mock
     private RestTemplate restTemplate;
 
+    @InjectMocks
+    private RoundRobinService roundRobinService;
+
+    private Map<String, Object> requestBody;
+
     @BeforeEach
-    public void setUp() {
+    void setUp() {
+        // Initialize Mockito annotations
         MockitoAnnotations.openMocks(this);
+
+        // Manually set instance URLs for testing
+        roundRobinService.instanceUrls = "http://instance1.com,http://instance2.com";
+
+        // Manually call the @PostConstruct method to initialize instances
+        roundRobinService.init();
+
+        // Prepare the request body for testing
+        requestBody = new HashMap<>();
+        requestBody.put("key", "value");
     }
 
     @Test
-    void testForwardRequestToFirstInstance() {
-        // Given
-        Map<String, Object> requestBody = new HashMap<>();
-        ResponseEntity<Map> mockResponse = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+    void testForwardRequest_Successful() {
+        // Mock a successful response from the first instance
+        ResponseEntity<Map> response = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+        when(restTemplate.postForEntity(eq("http://instance1.com"), any(), eq(Map.class))).thenReturn(response);
 
-        when(restTemplate.postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class)))
-                .thenReturn(mockResponse);
+        ResponseEntity<?> result = roundRobinService.forwardRequest(requestBody);
 
-        // When
-        ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
-
-        // Then
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-
-        // Capture the URL and verify it was the first instance
-        ArgumentCaptor<String> urlCaptor = ArgumentCaptor.forClass(String.class);
-        verify(restTemplate, times(1)).postForEntity(urlCaptor.capture(), any(), eq(Map.class));
-        assertEquals("http://localhost:8081/api", urlCaptor.getValue());
+        // Assert the result is successful
+        assertEquals(HttpStatus.OK, result.getStatusCode());
+        verify(restTemplate, times(1)).postForEntity(eq("http://instance1.com"), any(), eq(Map.class));
     }
 
     @Test
-    void testRoundRobinBehaviorAcrossInstances() {
-        // Given
-        Map<String, Object> requestBody = new HashMap<>();
-        ResponseEntity<Map> mockResponse = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+    void testForwardRequest_FirstInstanceFails_SecondSucceeds() {
+        // Simulate a failure on the first instance
+        when(restTemplate.postForEntity(eq("http://instance1.com"), any(), eq(Map.class)))
+                .thenThrow(new RestClientException("Instance 1 failed"));
 
-        // Simulate the first instance failing
-        when(restTemplate.postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class)))
-                .thenThrow(new RestClientException("Instance 8081 down"));
+        // Simulate a successful response from the second instance
+        ResponseEntity<Map> response = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+        when(restTemplate.postForEntity(eq("http://instance2.com"), any(), eq(Map.class))).thenReturn(response);
 
-        // Simulate the second instance succeeding
-        when(restTemplate.postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class)))
-                .thenReturn(mockResponse);
+        ResponseEntity<?> result = roundRobinService.forwardRequest(requestBody);
 
-        // When
-        ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
-
-        // Then
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-
-        // Verify first call was to the first instance, and it failed
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class));
-
-        // Verify the second call was to the second instance and succeeded
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class));
+        // Assert that the second instance was tried and succeeded
+        assertEquals(HttpStatus.OK, result.getStatusCode());
+        verify(restTemplate, times(1)).postForEntity(eq("http://instance1.com"), any(), eq(Map.class));
+        verify(restTemplate, times(1)).postForEntity(eq("http://instance2.com"), any(), eq(Map.class));
     }
 
     @Test
-    void testAllInstancesDownFailure() {
-        // Given
-        Map<String, Object> requestBody = new HashMap<>();
-
-        // Simulate all instances failing
+    void testForwardRequest_AllInstancesFail() {
+        // Simulate failure for both instances
         when(restTemplate.postForEntity(anyString(), any(), eq(Map.class)))
-                .thenThrow(new RestClientException("Instance down"));
+                .thenThrow(new RestClientException("Instance failed"));
 
-        // When / Then
-        assertThrows(RestClientException.class, () -> roundRobinService.forwardRequest(requestBody));
+        RestClientException exception = assertThrows(RestClientException.class, () -> {
+            roundRobinService.forwardRequest(requestBody);
+        });
 
-        // Verify that all instances were tried
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class));
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class));
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8083/api"), any(), eq(Map.class));
+        // Assert that the exception was thrown and all instances were tried
+        assertEquals("Instance failed", exception.getMessage());
+        verify(restTemplate, times(2)).postForEntity(anyString(), any(), eq(Map.class));
     }
 
     @Test
-    void testInstanceTakingTooLong() {
-        // Given
-        Map<String, Object> requestBody = new HashMap<>();
-        ResponseEntity<Map> mockResponse = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+    void testCircuitBreaker_SkipOpenCircuitInstance() {
+        // Simulate that the first instance is in the open circuit state
+        roundRobinService.circuitBreaker.put("http://instance1.com", Instant.now());
 
-        // Simulate first instance taking too long (timeout)
-        doAnswer(invocation -> {
-            Thread.sleep(4000);
-            throw new RestClientException("Timeout");
-        }).when(restTemplate).postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class));
+        // Mock a successful response from the second instance
+        ResponseEntity<Map> response = new ResponseEntity<>(new HashMap<>(), HttpStatus.OK);
+        when(restTemplate.postForEntity(eq("http://instance2.com"), any(), eq(Map.class))).thenReturn(response);
 
-        // Simulate the second instance responding successfully
-        when(restTemplate.postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class)))
-                .thenReturn(mockResponse);
+        ResponseEntity<?> result = roundRobinService.forwardRequest(requestBody);
 
-        // When
-        ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
-
-        // Then
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-
-        // Verify that the first instance was tried and timed out
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class));
-
-        // Verify that the second instance was used after the timeout of the first instance
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class));
+        // Assert that the first instance was skipped due to the circuit breaker, and the second instance succeeded
+        assertEquals(HttpStatus.OK, result.getStatusCode());
+        verify(restTemplate, times(1)).postForEntity(eq("http://instance2.com"), any(), eq(Map.class));
+        verify(restTemplate, never()).postForEntity(eq("http://instance1.com"), any(), eq(Map.class));
     }
 
     @Test
-    void testAllInstancesFailIncludingTimeout() {
-        Map<String, Object> requestBody = new HashMap<>();
+    void testInit_NoInstanceUrlsProvided() {
+        // Simulate a missing instanceUrls configuration
+        roundRobinService.instanceUrls = "";
 
-        // Simulate all instances failing (timeouts or errors)
-        doAnswer(invocation -> {
-            Thread.sleep(4000);
-            throw new RestClientException("Timeout");
-        }).when(restTemplate).postForEntity(anyString(), any(), eq(Map.class));
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> {
+            roundRobinService.init();
+        });
 
-        // When / Then
-        assertThrows(RestClientException.class, () -> roundRobinService.forwardRequest(requestBody));
-
-        // Verify that all instances were tried and each timed out
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8081/api"), any(), eq(Map.class));
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8082/api"), any(), eq(Map.class));
-        verify(restTemplate, times(1)).postForEntity(eq("http://localhost:8083/api"), any(), eq(Map.class));
+        assertEquals("Instance URLs cannot be null or empty", exception.getMessage());
     }
 }

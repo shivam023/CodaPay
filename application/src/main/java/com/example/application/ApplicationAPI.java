@@ -10,16 +10,8 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 @SpringBootApplication
-@RestController
-@RequestMapping("/api")
 public class ApplicationAPI {
-
 	public static void main(String[] args) {
 		SpringApplication.run(ApplicationAPI.class, args);
-	}
-
-	@PostMapping
-	public Map<String, Object> handlePost(@RequestBody Map<String, Object> payload) {
-		return payload;
 	}
 }

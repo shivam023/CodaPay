@@ -1,10 +1,11 @@
 package com.example.roundrobin.service;
 
 import com.example.roundrobin.service.interfaces.IRoundRobinService;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -21,17 +22,27 @@ public class RoundRobinService implements IRoundRobinService {
     private static final Logger logger = LoggerFactory.getLogger(RoundRobinService.class);
 
     private final RestTemplate restTemplate;
-    private final List<String> instances = List.of(
-            "http://localhost:8081/api",
-            "http://localhost:8082/api",
-            "http://localhost:8083/api"
-    );
+
+    @Value("${application.instances}")
+    String instanceUrls;
+
+    private List<String> instances;
     private final AtomicInteger counter = new AtomicInteger(0);
-    private final int maxAttempts = instances.size();
-    private final ConcurrentHashMap<String, Instant> circuitBreaker = new ConcurrentHashMap<>();
+    private int maxAttempts;
+    final ConcurrentHashMap<String, Instant> circuitBreaker = new ConcurrentHashMap<>();
 
     public RoundRobinService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
+    }
+
+    @PostConstruct
+    void init() {
+        if (instanceUrls == null || instanceUrls.isEmpty()) {
+            logger.error("No instances provided in configuration. Please check your configuration.");
+            throw new IllegalArgumentException("Instance URLs cannot be null or empty");
+        }
+        this.instances = List.of(instanceUrls.split(","));
+        this.maxAttempts = instances.size();
     }
 
     @Override
@@ -43,10 +54,14 @@ public class RoundRobinService implements IRoundRobinService {
             targetInstance = getNextInstance();
             logger.info("Attempting to forward request to instance: {}", targetInstance);
             try {
+                // can use facade design pattern for different rest client calls
                 return restTemplate.postForEntity(Objects.requireNonNull(targetInstance), requestBody, Map.class);
             } catch (RestClientException e) {
                 attempts++;
                 logger.error("Failed to forward request to instance: {}. Error: {}", targetInstance, e.getMessage());
+
+                // Add the instance to the circuit breaker on failure
+                circuitBreaker.put(Objects.requireNonNull(targetInstance), Instant.now());
 
                 if (attempts >= maxAttempts) {
                     logger.error("All instances failed after {} attempts.", attempts);
@@ -82,8 +97,9 @@ public class RoundRobinService implements IRoundRobinService {
         if (circuitBreaker.containsKey(instance)) {
             Instant failedTime = circuitBreaker.get(instance);
             Instant now = Instant.now();
-            // If the instance failed more than 60 seconds ago, close the circuit
-            if (now.isAfter(failedTime.plusSeconds(60))) {
+            // If the instance failed more than 10 seconds ago, close the circuit
+            if (now.isAfter(failedTime.plusSeconds(10))) {
+                logger.info("Circuit for instance {} is closed.", instance);
                 circuitBreaker.remove(instance);
                 return false;
             } else {
