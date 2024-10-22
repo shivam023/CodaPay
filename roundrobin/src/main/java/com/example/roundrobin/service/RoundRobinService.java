@@ -74,7 +74,7 @@ public class RoundRobinService implements IRoundRobinService {
     }
 
     // Get the next instance in round-robin fashion, skipping instances with open circuits
-    private String getNextInstance(int maxAttemptsValue) {
+    String getNextInstance(int maxAttemptsValue) {
         int attempts = 0;
         String instance;
         while (attempts < maxAttemptsValue) {

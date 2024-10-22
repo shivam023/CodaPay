@@ -1,10 +1,9 @@
 package com.example.roundrobin.service;
 
-import com.example.roundrobin.service.RoundRobinService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -12,9 +11,9 @@ import org.springframework.web.client.RestTemplate;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -39,6 +38,8 @@ class RoundRobinServiceTest {
 
         // Assert
         assertEquals(2, roundRobinService.getInstances().size());
+        assertTrue(roundRobinService.getInstances().contains("http://localhost:8081"));
+        assertTrue(roundRobinService.getInstances().contains("http://localhost:8082"));
     }
 
     @Test
@@ -47,10 +48,28 @@ class RoundRobinServiceTest {
         Map<String, Object> requestBody = Map.of("key", "value");
         ResponseEntity<Map> mockResponse = ResponseEntity.ok(Map.of("response", "success"));
 
-        // Add instances
         roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
 
-        // Set mock behavior
+        when(restTemplate.postForEntity(eq("http://localhost:8081"), eq(requestBody), eq(Map.class)))
+                .thenReturn(mockResponse);
+
+        // Act
+        ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
+
+        // Assert
+        assertNotNull(response);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("success", ((Map<?, ?>) response.getBody()).get("response"));
+    }
+
+    @Test
+    void testForwardRequest_retryOnFailure() {
+        // Arrange
+        Map<String, Object> requestBody = Map.of("key", "value");
+        ResponseEntity<Map> mockResponse = ResponseEntity.ok(Map.of("response", "success"));
+
+        roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
+
         when(restTemplate.postForEntity(eq("http://localhost:8081"), eq(requestBody), eq(Map.class)))
                 .thenThrow(new RestClientException("Connection refused"));
         when(restTemplate.postForEntity(eq("http://localhost:8082"), eq(requestBody), eq(Map.class)))
@@ -61,7 +80,7 @@ class RoundRobinServiceTest {
 
         // Assert
         assertNotNull(response);
-        assertEquals(200, response.getStatusCode().value());
+        assertEquals(HttpStatus.OK, response.getStatusCode());
         assertEquals("success", ((Map<?, ?>) response.getBody()).get("response"));
     }
 
@@ -70,96 +89,108 @@ class RoundRobinServiceTest {
         // Arrange
         Map<String, Object> requestBody = Map.of("key", "value");
 
-        // Add instances
         roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
 
-        // Mock failures
-        when(restTemplate.postForEntity(eq("http://localhost:8081"), eq(requestBody), eq(Map.class)))
+        when(restTemplate.postForEntity(any(String.class), eq(requestBody), eq(Map.class)))
                 .thenThrow(new RestClientException("Connection refused"));
-        when(restTemplate.postForEntity(eq("http://localhost:8082"), eq(requestBody), eq(Map.class)))
-                .thenThrow(new RestClientException("Connection refused"));
-
-        // Act & Assert
-        Exception exception = assertThrows(RestClientException.class, () -> {
-            roundRobinService.forwardRequest(requestBody);
-        });
-
-        assertEquals("Connection refused", exception.getMessage());
-    }
-
-    @Test
-    void testCircuitBreaker_open() {
-        // Arrange
-        String instance = "http://localhost:8081";
-
-        // Simulate the instance being marked as failed recently (within the threshold)
-        roundRobinService.circuitBreaker.put(instance, Instant.now().minusSeconds(5));
-
-        // Act
-        boolean isOpen = roundRobinService.isCircuitOpen(instance);
-
-        // Assert
-        assertTrue(isOpen, "Expected the circuit to be open since it failed recently.");
-    }
-
-    @Test
-    void testCircuitBreaker_closed() {
-        // Arrange
-        String instance = "http://localhost:8081";
-
-        // Simulate the instance being marked as failed over the threshold
-        roundRobinService.circuitBreaker.put(instance, Instant.now().minusSeconds(11));
-
-        // Act
-        boolean isOpen = roundRobinService.isCircuitOpen(instance);
-
-        // Assert
-        assertFalse(isOpen, "Expected the circuit to be closed since it failed more than 10 seconds ago.");
-    }
-
-    @Test
-    void testForwardRequest_partialFailure() {
-        // Arrange
-        Map<String, Object> requestBody = Map.of("key", "value");
-        ResponseEntity<Map> mockResponse = ResponseEntity.ok(Map.of("response", "success"));
-
-        // Add instances
-        roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
-
-        // First instance fails, second succeeds
-        when(restTemplate.postForEntity(eq("http://localhost:8081"), any(Map.class), eq(Map.class)))
-                .thenThrow(new RestClientException("Connection refused"));
-        when(restTemplate.postForEntity(eq("http://localhost:8082"), any(Map.class), eq(Map.class)))
-                .thenReturn(mockResponse);
 
         // Act
         ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
 
         // Assert
         assertNotNull(response);
-        assertEquals(200, response.getStatusCode().value());
-        assertEquals("success", ((Map<?, ?>) response.getBody()).get("response"));
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+        assertEquals("All instances are unavailable after 2 attempts.", ((Map<?, ?>) response.getBody()).get("error"));
     }
 
     @Test
-    void testForwardRequest_takesLongerThanExpected() {
+    void testGetNextInstance_success() {
+        // Arrange
+        roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
+
+        // Act
+        String firstInstance = roundRobinService.getNextInstance(2);
+        String secondInstance = roundRobinService.getNextInstance(2);
+
+        // Assert
+        assertEquals("http://localhost:8081", firstInstance);
+        assertEquals("http://localhost:8082", secondInstance);
+    }
+
+    @Test
+    void testIsCircuitOpen_open() {
+        // Arrange
+        String instance = "http://localhost:8081";
+        roundRobinService.circuitBreaker.put(instance, Instant.now());
+
+        // Act
+        boolean isOpen = roundRobinService.isCircuitOpen(instance);
+
+        // Assert
+        assertTrue(isOpen, "Circuit should be open for this instance.");
+    }
+
+    @Test
+    void testIsCircuitOpen_closed() {
+        // Arrange
+        String instance = "http://localhost:8081";
+        Instant pastTime = Instant.now().minusSeconds(11);
+        roundRobinService.circuitBreaker.put(instance, pastTime);
+
+        // Act
+        boolean isOpen = roundRobinService.isCircuitOpen(instance);
+
+        // Assert
+        assertFalse(isOpen, "Circuit should be closed after the timeout period.");
+    }
+
+    @Test
+    void testCircuitBreakerTimeout_closesAfterTimeout() throws InterruptedException {
+        // Arrange
+        String instance = "http://localhost:8081";
+        roundRobinService.circuitBreaker.put(instance, Instant.now());
+
+        // Simulate a delay to allow timeout
+        Thread.sleep(11000);
+
+        // Act
+        boolean isOpen = roundRobinService.isCircuitOpen(instance);
+
+        // Assert
+        assertFalse(isOpen, "Circuit should be closed after 10 seconds.");
+    }
+
+    @Test
+    void testForwardRequest_circuitBreaker() throws InterruptedException {
         // Arrange
         Map<String, Object> requestBody = Map.of("key", "value");
 
-        // Add instances
         roundRobinService.updateInstances(List.of("http://localhost:8081", "http://localhost:8082"));
 
-        // Simulate a long response from the first instance
+        // First, fail the first instance
         when(restTemplate.postForEntity(eq("http://localhost:8081"), eq(requestBody), eq(Map.class)))
-                .thenThrow(new RestClientException("Connection refused")); // first instance fails
+                .thenThrow(new RestClientException("Connection refused"));
+
+        // Simulate circuit breaker open
+        roundRobinService.forwardRequest(requestBody);
+        assertTrue(roundRobinService.isCircuitOpen("http://localhost:8081"), "Circuit should be open after failure.");
+
+        // Second, successful call to the second instance
         when(restTemplate.postForEntity(eq("http://localhost:8082"), eq(requestBody), eq(Map.class)))
-                .thenThrow(new RestClientException("Timeout")); // second instance times out
+                .thenReturn(ResponseEntity.ok(Map.of("response", "success")));
 
-        // Act & Assert
-        Exception exception = assertThrows(RestClientException.class, () -> {
-            roundRobinService.forwardRequest(requestBody);
-        });
+        ResponseEntity<?> response = roundRobinService.forwardRequest(requestBody);
 
-        assertTrue(exception.getMessage().contains("Connection refused") || exception.getMessage().contains("Timeout"));
+        // Simulate waiting for circuit breaker to reset
+        Thread.sleep(11000);
+
+        // Act - Circuit should now close and the first instance should be retried
+        boolean isCircuitOpenAfterTimeout = roundRobinService.isCircuitOpen("http://localhost:8081");
+
+        // Assert
+        assertNotNull(response);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("success", ((Map<?, ?>) response.getBody()).get("response"));
+        assertFalse(isCircuitOpenAfterTimeout, "Circuit should be closed after timeout.");
     }
 }
