@@ -46,19 +46,19 @@ Run the RoundRobinApplication.class and the server will be available on port 808
 
 The circuit breaker prevents continuous attempts to call an instance that has failed or is slow to respond:
 
-	1.	Failure Detection: If a request fails or times out, the instance is marked as failed and added to the circuit breaker.
-	2.	Circuit State: Failed instances enter a “circuit open” state for a defined period (e.g., 10 seconds) during which they won’t receive requests. After the cooldown, they can be retried.
+	1. Failure Detection: If a request fails or times out, the instance is marked as failed and added to the circuit breaker.
+	2. Circuit State: Failed instances enter a “circuit open” state for a defined period (e.g., 10 seconds) during which they won’t receive requests. After the cooldown, they can be retried.
 
 Testing the Application
 
-	1.	Start the Application: Run the Application class of the Round Robin project.
-	2.	Start Service Instances: Execute the startInstance.bash script.
+	1. Start the Application: Run the Application class of the Round Robin project.
+	2. Start Service Instances: Execute the startInstance.bash script.
 
 Test Scenarios
 
-	1.	Connection Refused: Stop one instance and send a request to the load balancer. It should retry with the next instance. (8-81 port is never up so this case will be tested automatically)
-	2.	Delayed Response: Use the /api/delayed endpoint to simulate a slow instance. The load balancer should mark it as failed after exceeding the timeout.
-	3.	Normal Operation: Test the /api/normal endpoint to observe standard behavior.
+	1. Connection Refused: Stop one instance and send a request to the load balancer. It should retry with the next instance. (8-81 port is never up so this case will be tested automatically)
+	2. Delayed Response: Use the /api/delayed endpoint to simulate a slow instance. The load balancer should mark it as failed after exceeding the timeout.
+	3. Normal Operation: Test the /api/normal endpoint to observe standard behavior.
 
 Conclusion
 
