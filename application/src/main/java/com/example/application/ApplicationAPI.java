@@ -20,6 +20,6 @@ public class ApplicationAPI {
 
 	@PostMapping
 	public Map<String, Object> handlePost(@RequestBody Map<String, Object> payload) {
-		return payload;  // Echo back the received JSON
+		return payload;
 	}
 }

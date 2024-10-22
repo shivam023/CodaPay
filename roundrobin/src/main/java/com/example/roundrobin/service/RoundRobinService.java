@@ -12,6 +12,7 @@ import org.springframework.web.client.RestTemplate;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -19,21 +20,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RoundRobinService implements IRoundRobinService {
     private static final Logger logger = LoggerFactory.getLogger(RoundRobinService.class);
 
+    private final RestTemplate restTemplate;
     private final List<String> instances = List.of(
             "http://localhost:8081/api",
             "http://localhost:8082/api",
             "http://localhost:8083/api"
     );
-
     private final AtomicInteger counter = new AtomicInteger(0);
     private final int maxAttempts = instances.size();
-
-    // Track failures with a circuit breaker mechanism
     private final ConcurrentHashMap<String, Instant> circuitBreaker = new ConcurrentHashMap<>();
+
+    public RoundRobinService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
 
     @Override
     public ResponseEntity<?> forwardRequest(Map<String, Object> requestBody) {
-        RestTemplate restTemplate = createRestTemplateWithTimeout();
         int attempts = 0;
         String targetInstance;
 
@@ -41,32 +43,22 @@ public class RoundRobinService implements IRoundRobinService {
             targetInstance = getNextInstance();
             logger.info("Attempting to forward request to instance: {}", targetInstance);
             try {
-                return restTemplate.postForEntity(targetInstance, requestBody, Map.class);
+                return restTemplate.postForEntity(Objects.requireNonNull(targetInstance), requestBody, Map.class);
             } catch (RestClientException e) {
                 attempts++;
                 logger.error("Failed to forward request to instance: {}. Error: {}", targetInstance, e.getMessage());
 
-                // If this is the last attempt, throw the error back to the client
                 if (attempts >= maxAttempts) {
-                    logger.error("All instances failed after " + attempts + " attempts.");
-                    throw e;  // or return a custom error response
+                    logger.error("All instances failed after {} attempts.", attempts);
+                    throw e;
                 }
 
-                // Retry with the next instance
-                logger.info("Retrying with the next instance. Attempt: " + attempts);
+                logger.info("Retrying with the next instance. Attempt: {}", attempts);
             }
         }
 
         // If all retries fail, return a failure response
         return ResponseEntity.status(503).body(Map.of("error", "All instances are unavailable"));
-    }
-
-    // Method to create a RestTemplate with timeouts
-    private RestTemplate createRestTemplateWithTimeout() {
-        var factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(2000);  // 2 seconds for connection timeout
-        factory.setReadTimeout(3000);     // 3 seconds for read timeout
-        return new RestTemplate(factory);
     }
 
     // Get the next instance in round-robin fashion, skipping instances with open circuits
@@ -76,7 +68,6 @@ public class RoundRobinService implements IRoundRobinService {
         while (attempts < maxAttempts) {
             instance = instances.get(counter.getAndUpdate(i -> (i + 1) % instances.size()));
 
-            // Check if the instance is in circuit breaker mode (i.e., skip slow/unavailable instance)
             if (isCircuitOpen(instance)) {
                 logger.warn("Instance {} is in circuit breaker mode. Skipping.", instance);
                 attempts++;
@@ -84,10 +75,9 @@ public class RoundRobinService implements IRoundRobinService {
                 return instance;
             }
         }
-        return null; // If all instances are in circuit breaker mode
+        return null;
     }
 
-    // Check if the instance is in circuit breaker mode (skip if it's down)
     private boolean isCircuitOpen(String instance) {
         if (circuitBreaker.containsKey(instance)) {
             Instant failedTime = circuitBreaker.get(instance);
@@ -97,9 +87,9 @@ public class RoundRobinService implements IRoundRobinService {
                 circuitBreaker.remove(instance);
                 return false;
             } else {
-                return true; // Circuit is still open
+                return true;
             }
         }
-        return false; // Circuit is closed (instance is not in failure mode)
+        return false;
     }
 }
