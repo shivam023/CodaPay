@@ -33,10 +33,12 @@ public class InstanceListProvider {
 
             if (fileContent != null && !fileContent.isEmpty()) {
                 this.instances = List.of(fileContent.split(","));
-                roundRobinService.updateInstances(this.instances);
             } else {
                 logger.warn("No instance URLs found in the file.");
+                this.instances = List.of();
             }
+
+            roundRobinService.updateInstances(this.instances);
         } catch (IOException e) {
             logger.error("Error reading instance file: {}", e.getMessage());
         }
